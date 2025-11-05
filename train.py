@@ -1,8 +1,7 @@
-#!/usr/bin/python3
-
 import argparse
 import itertools
-
+import mlflow
+import mlflow.pytorch
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
@@ -13,7 +12,7 @@ from models import Generator
 from models import Discriminator
 from utils import ReplayBuffer
 from utils import LambdaLR
-from utils import Logger
+from utils import log_image
 from utils import weights_init_normal
 from datasets import ImageDataset
 
@@ -87,8 +86,19 @@ transforms_ = [ transforms.Resize(int(opt.size*1.12), Image.BICUBIC),
 dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True), 
                         batch_size=opt.batchSize, shuffle=True, num_workers=opt.n_cpu)
 
-# Loss plot
-logger = Logger(opt.n_epochs, len(dataloader))
+
+mlflow.set_experiment("cycleGAN")
+mlflow.start_run(run_name=f"run_{opt.epoch}_to_{opt.n_epochs}")
+mlflow.log_params({
+        "n_epochs": opt.n_epochs,
+        "batch_size": opt.batchSize,
+        "learning_rate": opt.lr,
+        "decay_epoch": opt.decay_epoch,
+        "image_size": opt.size,
+        "input_nc": opt.input_nc,
+        "output_nc": opt.output_nc
+    })
+
 ###################################
 
 ###### Training ######
@@ -170,10 +180,24 @@ for epoch in range(opt.epoch, opt.n_epochs):
         optimizer_D_B.step()
         ###################################
 
-        # Progress report (http://localhost:8097)
-        logger.log({'loss_G': loss_G, 'loss_G_identity': (loss_identity_A + loss_identity_B), 'loss_G_GAN': (loss_GAN_A2B + loss_GAN_B2A),
-                    'loss_G_cycle': (loss_cycle_ABA + loss_cycle_BAB), 'loss_D': (loss_D_A + loss_D_B)}, 
-                    images={'real_A': real_A, 'real_B': real_B, 'fake_A': fake_A, 'fake_B': fake_B})
+        metrics = {
+            "loss_G": loss_G.item(),
+            "loss_G_identity": (loss_identity_A + loss_identity_B).item(),
+            "loss_G_GAN": (loss_GAN_A2B + loss_GAN_B2A).item(),
+            "loss_G_cycle": (loss_cycle_ABA + loss_cycle_BAB).item(),
+            "loss_D": (loss_D_A + loss_D_B).item()
+        }
+
+        print(f"[Epoch {epoch}/{opt.n_epochs}] [Batch {i}/{len(dataloader)}] " +
+                " ".join([f"{k}: {v:.4f}" for k, v in metrics.items()]))
+        
+        mlflow.log_metrics(metrics, step=epoch * len(dataloader) + i)
+
+        if i % 100 == 0:
+            log_image(real_A, f"epoch_{epoch}_real_A.png")
+            log_image(real_B, f"epoch_{epoch}_real_B.png")
+            log_image(fake_A, f"epoch_{epoch}_fake_A.png")
+            log_image(fake_B, f"epoch_{epoch}_fake_B.png")
 
     # Update learning rates
     lr_scheduler_G.step()
@@ -181,8 +205,8 @@ for epoch in range(opt.epoch, opt.n_epochs):
     lr_scheduler_D_B.step()
 
     # Save models checkpoints
-    torch.save(netG_A2B.state_dict(), 'output/netG_A2B.pth')
-    torch.save(netG_B2A.state_dict(), 'output/netG_B2A.pth')
-    torch.save(netD_A.state_dict(), 'output/netD_A.pth')
-    torch.save(netD_B.state_dict(), 'output/netD_B.pth')
+    mlflow.pytorch.log_model(netG_A2B, "netG_A2B")
+    mlflow.pytorch.log_model(netG_B2A, "netG_B2A")
+    mlflow.pytorch.log_model(netD_A, "netD_A")
+    mlflow.pytorch.log_model(netD_B, "netD_B")
 ###################################
