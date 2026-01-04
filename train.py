@@ -78,15 +78,26 @@ fake_A_buffer = ReplayBuffer()
 fake_B_buffer = ReplayBuffer()
 
 # Dataset loader
-transforms_ = [ transforms.Resize(int(opt.size*1.12), Image.BICUBIC), 
-                transforms.RandomCrop(opt.size), 
+train_transforms = transforms.Compose([transforms.Resize((int(opt.size), int(opt.size)), Image.BICUBIC),  
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ]
-dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=transforms_, unaligned=True), 
-                        batch_size=opt.batchSize, shuffle=True, num_workers=opt.n_cpu)
+                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ])
+
+val_test_transforms = transforms.Compose([transforms.Resize((int(opt.size), int(opt.size)), Image.BICUBIC), 
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5)) ])
+
+train_dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=train_transforms, unaligned=True, mode="train"), 
+                        batch_size=opt.batchSize, shuffle=True, num_workers=0)
+
+val_dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=val_test_transforms, unaligned=True, mode="val"), 
+                        batch_size=1, shuffle=True, num_workers=opt.n_cpu)
+
+test_dataloader = DataLoader(ImageDataset(opt.dataroot, transforms_=val_test_transforms, unaligned=True, mode="test"), 
+                        batch_size=1, shuffle=True, num_workers=opt.n_cpu)
 
 
+mlflow.set_tracking_uri("file:///mnt/lustre/work/ritter/rvy682/mlruns")
 mlflow.set_experiment("cycleGAN")
 mlflow.start_run(run_name=f"run_{opt.epoch}_to_{opt.n_epochs}")
 mlflow.log_params({
@@ -101,23 +112,33 @@ mlflow.log_params({
 
 ###################################
 
-###### Training ######
+###### Training Loop ######
 for epoch in range(opt.epoch, opt.n_epochs):
-    for i, batch in enumerate(dataloader):
-        # Set model input
-        real_A = Variable(input_A.copy_(batch['A']))
-        real_B = Variable(input_B.copy_(batch['B']))
+    netG_A2B.train()
+    netG_B2A.train()
 
+    epoch_loss_G = 0.0
+    epoch_loss_G_identity = 0.0
+    epoch_loss_G_GAN = 0.0
+    epoch_loss_G_cycle = 0.0
+    epoch_loss_D = 0.0
+    numberbatches_train = 0
+
+    for i, batch in enumerate(train_dataloader):
+        # Set model input
+        real_A = Variable(batch['A'].type(Tensor))
+        real_B = Variable(batch['B'].type(Tensor))
+        
         ###### Generators A2B and B2A ######
         optimizer_G.zero_grad()
 
         # Identity loss
         # G_A2B(B) should equal B if real B is fed
         same_B = netG_A2B(real_B)
-        loss_identity_B = criterion_identity(same_B, real_B)*5.0
+        loss_identity_B = criterion_identity(same_B, real_B)*0.5
         # G_B2A(A) should equal A if real A is fed
         same_A = netG_B2A(real_A)
-        loss_identity_A = criterion_identity(same_A, real_A)*5.0
+        loss_identity_A = criterion_identity(same_A, real_A)*0.5
 
         # GAN loss
         fake_B = netG_A2B(real_A)
@@ -178,35 +199,114 @@ for epoch in range(opt.epoch, opt.n_epochs):
         loss_D_B.backward()
 
         optimizer_D_B.step()
-        ###################################
-
-        metrics = {
-            "loss_G": loss_G.item(),
-            "loss_G_identity": (loss_identity_A + loss_identity_B).item(),
-            "loss_G_GAN": (loss_GAN_A2B + loss_GAN_B2A).item(),
-            "loss_G_cycle": (loss_cycle_ABA + loss_cycle_BAB).item(),
-            "loss_D": (loss_D_A + loss_D_B).item()
-        }
-
-        print(f"[Epoch {epoch}/{opt.n_epochs}] [Batch {i}/{len(dataloader)}] " +
-                " ".join([f"{k}: {v:.4f}" for k, v in metrics.items()]))
         
-        mlflow.log_metrics(metrics, step=epoch * len(dataloader) + i)
+        ################################
 
-        if i % 100 == 0:
+        epoch_loss_G += loss_G.item()
+        epoch_loss_G_identity += (loss_identity_A + loss_identity_B).item()
+        epoch_loss_G_GAN += (loss_GAN_A2B + loss_GAN_B2A).item()
+        epoch_loss_G_cycle += (loss_cycle_ABA + loss_cycle_BAB).item()  
+        epoch_loss_D += (loss_D_A + loss_D_B).item()
+        numberbatches_train +=1 
+
+
+        print(f"[Epoch {epoch}/{opt.n_epochs}] [Batch {i}/{len(train_dataloader)}] "
+              f"loss_G={epoch_loss_G:.4f} loss_D={epoch_loss_D:.4f}")
+
+        if epoch % 5 == 0 and i == 0:
             log_image(real_A, f"epoch_{epoch}_real_A.png")
             log_image(real_B, f"epoch_{epoch}_real_B.png")
             log_image(fake_A, f"epoch_{epoch}_fake_A.png")
             log_image(fake_B, f"epoch_{epoch}_fake_B.png")
 
+    if numberbatches_train > 0:
+        avg_train_metrics = {
+            "train/loss_G": epoch_loss_G/ numberbatches_train,
+            "train/loss_G_identiy": epoch_loss_G_identity / numberbatches_train,
+            "train/loss_G_GAN": epoch_loss_G_GAN / numberbatches_train,
+            "train/loss_G_cycle": epoch_loss_G_cycle / numberbatches_train,
+            "train/loss_D": epoch_loss_D / numberbatches_train
+        }
+        mlflow.log_metrics(avg_train_metrics, step=epoch)
+    
+    # Save models checkpoints
+    # mlflow.pytorch.log_model(netG_A2B, "netG_A2B")
+    # mlflow.pytorch.log_model(netG_B2A, "netG_B2A")
+    # mlflow.pytorch.log_model(netD_A, "netD_A")
+    # mlflow.pytorch.log_model(netD_B, "netD_B")
+
+    ###################################
+
+    ###### Validation Loop #####
+    netG_A2B.eval()
+    netG_B2A.eval()
+
+    loss_val = 0.0
+    numberbatches_val = 0
+
+    with torch.no_grad():
+        for i, batch in enumerate(val_dataloader):
+            real_A = Variable(batch['A'].type(Tensor)) 
+            real_B = Variable(batch['B'].type(Tensor))
+
+            fake_B = netG_A2B(real_A)
+            fake_A = netG_B2A(real_B)
+
+            recovered_A = netG_B2A(fake_B)
+            recovered_B = netG_A2B(fake_A)
+
+            loss_cycle_val = (criterion_cycle(recovered_A, real_A) + criterion_cycle(recovered_B, real_B)) * 10.0
+            loss_identity_val = criterion_identity(netG_A2B(real_B), real_B) * 0.5 + criterion_identity(netG_B2A(real_A), real_A) * 0.5
+            val_loss_batch = loss_cycle_val + loss_identity_val
+
+            loss_val += val_loss_batch.item()
+            numberbatches_val += 1
+            
+            # if i == 0:
+            #     log_image(real_A, f"val_epoch_{epoch}_real_A.png")
+            #     log_image(real_B, f"val_epoch_{epoch}_real_B.png")
+            #     log_image(fake_A, f"val_epoch_{epoch}_fake_A.png")
+            #     log_image(fake_B, f"val_epoch_{epoch}_fake_B.png")
+        
+        if numberbatches_val > 0:
+            avg_val_metrics = {
+                "val/loss_val": loss_val / numberbatches_val
+            }
+            mlflow.log_metrics(avg_val_metrics, step=epoch)
+
+        
     # Update learning rates
     lr_scheduler_G.step()
     lr_scheduler_D_A.step()
     lr_scheduler_D_B.step()
 
-    # Save models checkpoints
-    mlflow.pytorch.log_model(netG_A2B, "netG_A2B")
-    mlflow.pytorch.log_model(netG_B2A, "netG_B2A")
-    mlflow.pytorch.log_model(netD_A, "netD_A")
-    mlflow.pytorch.log_model(netD_B, "netD_B")
-###################################
+    torch.save(netG_A2B.state_dict(), f"/mnt/lustre/work/ritter/rvy682/outputs/netG_A2B.pt")
+    torch.save(netG_B2A.state_dict(), f"/mnt/lustre/work/ritter/rvy682/outputs/netG_B2A.pt")
+    torch.save(netD_A.state_dict(), f"/mnt/lustre/work/ritter/rvy682/outputs/netD_A.pt")
+    torch.save(netD_B.state_dict(), f"/mnt/lustre/work/ritter/rvy682/outputs/netD_B.pt")
+    
+##### Testing Loop ######
+netG_A2B.eval()
+netG_B2A.eval()
+
+with torch.no_grad():
+    for i, batch in enumerate(test_dataloader):
+        real_A = Variable(batch['A'].type(Tensor))
+        real_B = Variable(batch['B'].type(Tensor))
+
+        fake_B = netG_A2B(real_A)
+        fake_A = netG_B2A(real_B)
+
+        log_image(fake_B, f"test_fakeB_{i}.png")
+        log_image(fake_A, f"test_fakeA_{i}.png")
+        
+mlflow.end_run()
+
+        
+
+
+
+
+
+
+        

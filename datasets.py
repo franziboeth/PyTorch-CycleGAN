@@ -8,11 +8,18 @@ import torchvision.transforms as transforms
 
 class ImageDataset(Dataset):
     def __init__(self, root, transforms_=None, unaligned=False, mode='train'):
-        self.transform = transforms.Compose(transforms_)
+        if isinstance(transforms_, list):
+            self.transform = transforms.Compose(transforms_)
+        else:
+            self.transform = transforms_
         self.unaligned = unaligned
+        self.mode = mode
 
-        self.files_A = sorted(glob.glob(os.path.join(root, '%s/A' % mode) + '/*.*'))
-        self.files_B = sorted(glob.glob(os.path.join(root, '%s/B' % mode) + '/*.*'))
+        dir_A = os.path.join(root, mode, "A")
+        dir_B = os.path.join(root, mode, "B")
+
+        self.files_A = sorted(glob.glob(os.path.join(dir_A , '*.*')))
+        self.files_B = sorted(glob.glob(os.path.join(dir_B, '*.*')))
 
     def __getitem__(self, index):
         item_A = self.transform(Image.open(self.files_A[index % len(self.files_A)]).convert("RGB"))
